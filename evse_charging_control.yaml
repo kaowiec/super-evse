@@ -1,141 +1,131 @@
 blueprint:
   name: EVSE Charging Control
-  description: >
-    Automatyzacja regulacji mocy ładowania samochodu elektrycznego, która dostosowuje moc ładowania w zależności od produkcji energii z fotowoltaiki, zużycia domu i minimalnego czasu działania.
+  description: Automatyzacja regulująca moc ładowania EVSE w zależności od nadwyżki produkcji z fotowoltaiki.
   domain: automation
   input:
     evse_switch:
       name: EVSE Switch
-      description: Przełącznik ładowarki EVSE
       selector:
         entity:
           domain: switch
+    evse_current:
+      name: EVSE Configured Current
+      selector:
+        entity:
+          domain: number
+    pv_production:
+      name: Production PV
+      selector:
+        entity:
+          domain: sensor
+    main_consumption:
+      name: Main Consumption
+      selector:
+        entity:
+          domain: sensor
     evse_power:
-      name: EVSE Current Power
-      description: Czujnik aktualnej mocy ładowania EVSE
-      selector:
-        entity:
-          domain: sensor
-    evse_set_value:
-      name: EVSE Set Value
-      description: Wartość ustawiona dla ładowarki EVSE (A)
-      selector:
-        entity:
-          domain: input_number
-    solar_production:
-      name: Solar Production
-      description: Czujnik produkcji energii z fotowoltaiki
-      selector:
-        entity:
-          domain: sensor
-    main_meter:
-      name: Main Meter Consumption
-      description: Czujnik zużycia energii z licznika głównego
-      selector:
-        entity:
-          domain: sensor
-    home_consumption:
-      name: Home Consumption
-      description: Czujnik zużycia energii w domu
+      name: EVSE Power
       selector:
         entity:
           domain: sensor
     battery_soc:
       name: Battery SOC
-      description: Czujnik stanu naładowania baterii
       selector:
         entity:
           domain: sensor
     battery_power:
       name: Battery Power
-      description: Czujnik mocy baterii
       selector:
         entity:
           domain: sensor
-    evse_min_run_time:
-      name: EVSE Minimum Run Time
-      description: Timer minimalnego czasu działania EVSE
+    home_consumption:
+      name: Home Consumption
       selector:
         entity:
-          domain: timer
-    evse_active:
-      name: EVSE Active State
-      description: Input boolean for EVSE active state
+          domain: sensor
+    evse_min_run_time_active:
+      name: EVSE Minimum Run Time Active
       selector:
         entity:
           domain: input_boolean
+    evse_min_run_time:
+      name: EVSE Minimum Run Time
+      selector:
+        entity:
+          domain: input_number
+    evse_min_run_timer:
+      name: EVSE Minimum Run Timer
+      selector:
+        entity:
+          domain: timer
 
 trigger:
-  - platform: time_pattern
-    seconds: "/5"
   - platform: state
-    entity_id: !input evse_set_value
+    entity_id: 
+      - input: evse_current
+
 condition:
   - condition: template
     value_template: >
-      {{ states(!input 'solar_production') | float > (states(!input 'home_consumption') | float + 4.320) }}
+      {{ states('sensor.production_pv') | float(0) > (states('sensor.home_consumption') | float(0) + 4.320) }}
+
 action:
   - choose:
       - conditions:
-          - condition: template
-            value_template: >
-              {{ states(!input 'evse_set_value') | float < 6 and is_state(!input 'evse_active', 'off') }}
+          - condition: state
+            entity_id: 
+              - input: evse_min_run_time_active
+            state: 'off'
         sequence:
+          - service: timer.start
+            data:
+              duration: '00:{{ states("input_number.evse_min_run_time") | int(4) }}:00'
+            target:
+              entity_id: 
+                - input: evse_min_run_timer
           - service: input_boolean.turn_on
             target:
-              entity_id: !input evse_active
-          - service: timer.start
-            target:
-              entity_id: !input evse_min_run_time
+              entity_id: 
+                - input: evse_min_run_time_active
       - conditions:
           - condition: template
             value_template: >
-              {{ is_state(!input 'evse_active', 'on') and is_state(!input 'evse_min_run_time', 'active') }}
+              {% set pv_production = states('sensor.production_pv') | float %}
+              {% set home_consumption = states('sensor.home_consumption') | float %}
+              {% set evse_power = states('sensor.evse_power') | float %}
+              {% set battery_power = states('sensor.battery_power') | float %}
+              {% set current_evse_current = states('number.evse_configured_current') | float %}
+              {% set calculated_power = pv_production - home_consumption %}
+              {% set new_evse_current = (calculated_power / 230) | round(1) %}
+              {{ new_evse_current >= 6.0 and new_evse_current <= 16.0 and battery_power >= 0 }}
         sequence:
-          - service: input_number.set_value
-            target:
-              entity_id: !input evse_set_value
-            data:
-              value: "{{ states(!input 'evse_power') | float }}"
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ not is_state(!input 'evse_active', 'on') }}
-        sequence:
-          - service: input_number.set_value
-            target:
-              entity_id: !input evse_set_value
+          - service: number.set_value
             data:
               value: >
-                {% set production = states(!input 'solar_production') | float %}
-                {% set consumption = states(!input 'home_consumption') | float %}
-                {% set battery = states(!input 'battery_power') | float %}
-                {% set current_power = states(!input 'evse_power') | float %}
-                {% set surplus = production - consumption - battery %}
-                {% if surplus > 0 %}
-                  {% set new_power = current_power + (surplus / 1000) %}
-                {% else %}
-                  {% set new_power = current_power - (abs(surplus) / 1000) %}
-                {% endif %}
-                {% if new_power < 6 %}
-                  0
-                {% elif new_power > 16 %}
-                  16
-                {% else %}
-                  {{ new_power | round(1) }}
-                {% endif %}
+                {% set pv_production = states('sensor.production_pv') | float %}
+                {% set home_consumption = states('sensor.home_consumption') | float %}
+                {% set evse_power = states('sensor.evse_power') | float %}
+                {% set battery_power = states('sensor.battery_power') | float %}
+                {% set current_evse_current = states('number.evse_configured_current') | float %}
+                {% set calculated_power = pv_production - home_consumption %}
+                {% set new_evse_current = (calculated_power / 230) | round(1) %}
+                {{ [new_evse_current, 6.0] | max }}
+            target:
+              entity_id: 
+                - input: evse_current
+
       - conditions:
-          - condition: template
-            value_template: >
-              {{ trigger.event == 'timer.finished' and trigger.event.data.entity_id == !input 'evse_min_run_time' }}
+          - condition: state
+            entity_id: 
+              - input: evse_min_run_timer
+            state: 'idle'
         sequence:
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: >
-                      {{ states(!input 'solar_production') | float <= (states(!input 'home_consumption') | float + 4.320) }}
-                sequence:
-                  - service: input_boolean.turn_off
-                    target:
-                      entity_id: !input evse_active
-mode: single
+          - service: input_boolean.turn_off
+            target:
+              entity_id: 
+                - input: evse_min_run_time_active
+          - service: number.set_value
+            data:
+              value: 0
+            target:
+              entity_id: 
